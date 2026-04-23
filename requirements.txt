@@ -1,0 +1,7 @@
+kurigram
+pillow
+TgCrypto
+httpx
+motor
+beautifulsoup4
+lxml

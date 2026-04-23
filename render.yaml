@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: apple-music-bot
+    runtime: docker
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: apple_music_bot
+      - key: LOG_CHANNEL
+        sync: false
+      - key: DEV_URL
+        sync: false
