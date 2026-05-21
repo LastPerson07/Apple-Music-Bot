@@ -3,28 +3,35 @@ import re
 import httpx
 from bs4 import BeautifulSoup
 
-APL_BASE = "https://aplmate.com"
+APL_BASE    = "https://aplmate.com"
+APL_CDN     = "https://cdndl.aplmate.com"
 
-# Cloudflare. // Don't sync the repo yet 
 HEADERS = {
-    "User-Agent":        "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-    "Accept":            "*/*",
-    "Accept-Language":   "en-US,en;q=0.9",
-    "Accept-Encoding":   "gzip, deflate, br",
-    "Origin":            APL_BASE,
-    "Referer":           APL_BASE + "/",
-    "X-Requested-With":  "XMLHttpRequest",
-    "Sec-Fetch-Dest":    "empty",
-    "Sec-Fetch-Mode":    "cors",
-    "Sec-Fetch-Site":    "same-origin",
-    "sec-ch-ua":         '"Chromium";v="124", "Google Chrome";v="124"',
-    "sec-ch-ua-mobile":  "?1",
+    "User-Agent":         "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+    "Accept":             "*/*",
+    "Accept-Language":    "en-US,en;q=0.9",
+    "Accept-Encoding":    "gzip, deflate, br",
+    "Origin":             APL_BASE,
+    "Referer":            APL_BASE + "/",
+    "X-Requested-With":   "XMLHttpRequest",
+    "Sec-Fetch-Dest":     "empty",
+    "Sec-Fetch-Mode":     "cors",
+    "Sec-Fetch-Site":     "same-origin",
+    "sec-ch-ua":          '"Chromium";v="124", "Google Chrome";v="124"',
+    "sec-ch-ua-mobile":   "?1",
     "sec-ch-ua-platform": '"Android"',
 }
 
 TIMEOUT     = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
+
+# Domains/patterns that are never download links
+_SKIP_RE = re.compile(
+    r"(ko-fi\.com|buymeacoffee|patreon|twitter|instagram|facebook"
+    r"|youtube|tiktok|discord|t\.me|mailto:|javascript:)",
+    re.IGNORECASE,
+)
 
 
 async def init_session(client: httpx.AsyncClient):
@@ -90,6 +97,55 @@ async def get_all_track_forms(client: httpx.AsyncClient, music_url: str, token: 
     return track_forms, thumb
 
 
+def _is_download_link(href: str) -> bool:
+    """
+    Return True if this href is a real aplmate download link.
+    Currently: https://cdndl.aplmate.com/mp3?token=...
+    Also accepts the old /dl?token= path in case they revert.
+    """
+    if _SKIP_RE.search(href):
+        return False
+    if APL_CDN in href:          # cdndl.aplmate.com — new CDN domain
+        return True
+    if "/dl?token=" in href:     # old path format (kept for safety)
+        return True
+    return False
+
+
+def _extract_links(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    seen: set[str] = set()
+
+    for a in soup.find_all("a", href=True):
+        href: str = a["href"].strip()
+        if not href or href == "#":
+            continue
+
+        # Build absolute URL for relative hrefs
+        if href.startswith("/"):
+            full = APL_BASE + href
+        else:
+            full = href
+
+        if full in seen:
+            continue
+        seen.add(full)
+
+        if not _is_download_link(full):
+            continue
+
+        label = a.get_text(strip=True) or "Download"
+
+        # Drop "Download Another Song" navigation links
+        if re.search(r"another\s+song", label, re.IGNORECASE):
+            continue
+
+        results.append({"quality": label, "link": full})
+
+    return results
+
+
 async def get_links_for_track(
     client: httpx.AsyncClient,
     fields: dict,
@@ -105,28 +161,27 @@ async def get_links_for_track(
                     headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
                 )
                 j = r.json()
+
                 if j.get("error"):
-                    print(f"[Track {track_index}] Error: {j.get('message')}")
+                    msg = j.get("message", "")
+                    print(f"[Track {track_index}] Server error: {msg}")
+                    if attempt < MAX_RETRIES and re.search(
+                        r"refresh|try again|session", msg, re.IGNORECASE
+                    ):
+                        wait = RETRY_DELAY * attempt
+                        print(f"[Track {track_index}] Retrying in {wait:.0f}s…")
+                        await asyncio.sleep(wait)
+                        continue
                     return track_index, []
 
-                soup = BeautifulSoup(j["data"], "html.parser")
-                results = []
-                seen = set()
-                for a in soup.find_all("a", href=True):
-                    href = a["href"]
-                    if "/dl?token=" not in href:
-                        continue
-                    full = APL_BASE + href
-                    if full in seen:
-                        continue
-                    seen.add(full)
-                    label = a.get_text(strip=True)
-                    if label and "Another" not in label:
-                        results.append({"quality": label, "link": full})
+                raw_html = j.get("data") or j.get("html") or ""
+                results = _extract_links(raw_html)
 
                 print(f"\n── Track {track_index} ──")
                 for item in results:
                     print(f"  {item['quality']}: {item['link']}")
+                if not results:
+                    print(f"  [!] No download links found. HTML snippet: {raw_html[:300]}")
 
                 return track_index, results
 
@@ -134,7 +189,7 @@ async def get_links_for_track(
                 if attempt < MAX_RETRIES:
                     await asyncio.sleep(RETRY_DELAY * (2 ** (attempt - 1)))
                 else:
-                    print(f"[Track {track_index}] Failed after {MAX_RETRIES} attempts: {e}")
+                    print(f"[Track {track_index}] Timeout after {MAX_RETRIES} attempts: {e}")
                     return track_index, []
             except Exception as e:
                 print(f"[Track {track_index}] Unexpected error: {e}")
@@ -161,4 +216,3 @@ async def full_flow(music_url: str):
             results_all[track_index] = links
 
         return results_all, thumb
-        
