@@ -36,7 +36,7 @@ app = Client(
 PLAYLIST_UPLOAD_DELAY = 4.0
 CHUNK_SIZE = 1 * 1024 * 1024  # 1 MB
 
-# ── Concurrency control (high-traffic) ────────────────────────────────────────
+# ── Concurrency control ───────────────────────────────────────────────────────
 GLOBAL_AP_SEMAPHORE = asyncio.Semaphore(15)
 
 _USER_LOCKS: dict[int, asyncio.Lock] = {}
@@ -68,9 +68,7 @@ async def log_new_user(bot: Client, user) -> None:
         print(f"[Log] Failed to send new-user log: {e}")
 
 
-async def log_download_summary(
-    bot: Client, user, first_track: str, total: int
-) -> None:
+async def log_download_summary(bot: Client, user, first_track: str, total: int) -> None:
     if not config.LOG_CHANNEL:
         return
     name = user.first_name + (f" {user.last_name}" if user.last_name else "")
@@ -92,13 +90,8 @@ async def log_download_summary(
 
 
 async def log_track_to_channel(
-    bot: Client,
-    user,
-    song_name: str,
-    idx: int,
-    total: int,
-    audio_path: str,
-    thumb_path: str | None,
+    bot: Client, user, song_name: str, idx: int, total: int,
+    audio_path: str, thumb_path: str | None,
 ) -> None:
     if not config.LOG_CHANNEL:
         return
@@ -113,16 +106,12 @@ async def log_track_to_channel(
     try:
         if thumb_path:
             await bot.send_photo(
-                config.LOG_CHANNEL,
-                photo=thumb_path,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
+                config.LOG_CHANNEL, photo=thumb_path,
+                caption=caption, parse_mode=ParseMode.HTML,
             )
         await bot.send_audio(
-            config.LOG_CHANNEL,
-            audio=audio_path,
-            title=song_name,
-            file_name=f"{song_name}.mp3",
+            config.LOG_CHANNEL, audio=audio_path,
+            title=song_name, file_name=f"{song_name}.mp3",
             caption=caption if not thumb_path else None,
             parse_mode=ParseMode.HTML,
         )
@@ -182,56 +171,41 @@ _EMOJI_RE = re.compile(
     "]+",
     flags=re.UNICODE,
 )
-
-# Any "word(s).tld - " prefix, e.g. "APLMate.com - ", "dl.site.net – "
 _DOMAIN_PREFIX_RE = re.compile(
     r'^(?:[\w\-]+\.)+[a-zA-Z]{2,10}[\s\-\u2013\u2014]*',
     re.IGNORECASE,
 )
-
-# Explicit APLMate patterns covering every spacing/dash/unicode variant
 _APLMATE_RE = re.compile(
     r'(?i)'
-    r'apl\s*mate\s*'          # "APLMate" with optional space
-    r'(?:\.com?)?\s*'          # optional ".co" or ".com"
-    r'[-\u2013\u2014\s]*',     # any trailing dash/space combo
+    r'apl\s*mate\s*'
+    r'(?:\.com?)?\s*'
+    r'[-\u2013\u2014\s]*',
 )
 
 def clean_song_name(raw: str) -> str:
     name = raw
-
-    # ── Layer 1: blast APLMate explicitly in every form ───────────────────────
     name = _APLMATE_RE.sub('', name).strip()
-
-    # ── Layer 2: any remaining domain.tld prefix ──────────────────────────────
-    # Run up to 2 times in case of nested/double prefixes
     for _ in range(2):
         name = _DOMAIN_PREFIX_RE.sub('', name).strip()
-
-    # ── Layer 3: "Download site.com -" style ──────────────────────────────────
     name = re.sub(
         r'^[^\w\u0400-\u04FF]*Download\s+\S+\s*[-\u2013]?\s*',
         '', name, flags=re.IGNORECASE,
     ).strip()
-
-    # ── Layer 4: strip emojis ─────────────────────────────────────────────────
     name = _EMOJI_RE.sub('', name).strip()
-
-    # ── Layer 5: strip leading punctuation / dashes / spaces ─────────────────
     name = re.sub(r'^[\s\-\u2013\u2014_•·]+', '', name).strip()
-
-    # ── Layer 6: APLMate turns ( ) into _ — restore spaces ───────────────────
     name = re.sub(r'\s*_\s*', ' ', name).strip()
-
     return name
 
 
 def sanitize_filename(name: str) -> str:
-    """Make a string safe to use as a filename."""
     return re.sub(r'[\\/*?:"<>|]', '_', name).strip()
 
 
 def split_links(links: list[dict]) -> tuple[dict | None, dict | None]:
+    """
+    Separate the MP3 link from the Cover link.
+    Handles both old label format and new 'Download Mp3' / 'Download Cover [HD]' labels.
+    """
     audio = None
     cover = None
     for item in links:
@@ -286,13 +260,11 @@ async def handle_track(
             )
             return
 
-        # ── Clean the name, then RENAME the file so Telegram sees the clean name
         raw_name = os.path.splitext(os.path.basename(raw_audio_path))[0]
         song_name = clean_song_name(raw_name)
         print(f"[Upload] Raw : {raw_name}")
         print(f"[Upload] Name: {song_name}")
 
-        # Rename on disk — Telegram derives the audio title from the filename
         safe_fname = sanitize_filename(song_name) + ".mp3"
         audio_path = os.path.join(tmp, safe_fname)
         os.rename(raw_audio_path, audio_path)
@@ -300,7 +272,7 @@ async def handle_track(
         if first_track_ref[0] is None:
             first_track_ref[0] = song_name
 
-        # ── Thumbnail ─────────────────────────────────────────────────────────
+        # Thumbnail
         thumb_path = album_thumb_path
         if cover_entry:
             c_ok, cover_path = await download_file(dl, cover_entry["link"], tmp, f"cover_{idx}.jpg")
@@ -336,16 +308,13 @@ async def handle_track(
                 client.send_audio,
                 chat_id=message.chat.id,
                 audio=audio_path,
-                title=song_name,                   # explicit title → no leakage
-                file_name=safe_fname,              # explicit filename → no leakage
+                title=song_name,
+                file_name=safe_fname,
                 reply_parameters=ReplyParameters(message_id=message.id),
             )
             print(f"[Upload] ✓ Track {idx}/{total} sent.")
 
-            # ── Mirror to log channel ─────────────────────────────────────────
-            await log_track_to_channel(
-                client, user, song_name, idx, total, audio_path, thumb_path
-            )
+            await log_track_to_channel(client, user, song_name, idx, total, audio_path, thumb_path)
 
         except Exception as e:
             print(f"[Upload] ✗ Track {idx}/{total} failed: {e}")
@@ -449,6 +418,7 @@ async def handle_link(client: Client, message):
 
                 print(f"[Bot] User: {user.id} | {user.first_name} | Tracks: {total}")
 
+                # Download album thumbnail
                 _thumb_tmp = tempfile.mkdtemp()
                 album_thumb_path = None
                 if album_thumb:
